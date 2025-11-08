@@ -262,19 +262,64 @@ class OpenSkyApi(object):
     Main class of the OpenSky Network API. Instances retrieve data from OpenSky via HTTP.
     """
 
-    def __init__(self, username=None, password=None):
+    def __init__(self, username=None, password=None, client_id=None, client_secret=None):
         """Create an instance of the API client. If you do not provide username and password requests will be
         anonymous which imposes some limitations.
 
         :param str username: an OpenSky username (optional).
         :param str password: an OpenSky password for the given username (optional).
+        :param str client_id: OAuth2 client ID for authentication (optional).
+        :param str client_secret: OAuth2 client secret for authentication (optional).
         """
         if username is not None:
             self._auth = (username, password)
         else:
             self._auth = ()
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._access_token = None
+        self._token_expiry = 0
         self._api_url = "https://opensky-network.org/api"
         self._last_requests = defaultdict(lambda: 0)
+
+    def _get_oauth_token(self):
+        """
+        Retrieves an OAuth2 access token using client credentials flow.
+
+        :return: access token if successful, None otherwise.
+        :rtype: str | None
+        """
+        if self._client_id is None or self._client_secret is None:
+            return None
+
+        if self._access_token is not None and time.time() < self._token_expiry:
+            return self._access_token
+
+        try:
+            token_url = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
+            data = {
+                "grant_type": "client_credentials",
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+            }
+            r = requests.post(token_url, data=data, timeout=15.00)
+
+            if r.status_code == 200:
+                token_data = r.json()
+                self._access_token = token_data.get("access_token")
+                expires_in = token_data.get("expires_in", 3600)
+                self._token_expiry = time.time() + expires_in - 60
+                return self._access_token
+            else:
+                logger.debug(
+                    "OAuth token request failed. Status {0:d} - {1:s}".format(
+                        r.status_code, r.reason
+                    )
+                )
+        except Exception as e:
+            logger.debug("Exception during OAuth token request: {0}".format(str(e)))
+
+        return None
 
     def _get_json(self, url_post, callee, params=None):
         """
@@ -285,9 +330,19 @@ class OpenSkyApi(object):
         :param dict params: request parameters.
         :rtype: dict|None
         """
+        headers = {}
+        auth = self._auth
+
+        if self._client_id is not None and self._client_secret is not None:
+            token = self._get_oauth_token()
+            if token is not None:
+                headers["Authorization"] = "Bearer {0}".format(token)
+                auth = None
+
         r = requests.get(
             "{0:s}{1:s}".format(self._api_url, url_post),
-            auth=self._auth,
+            auth=auth,
+            headers=headers,
             params=params,
             timeout=15.00,
         )
